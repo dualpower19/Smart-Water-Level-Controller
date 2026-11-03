@@ -8,12 +8,13 @@
 //
 // Protections:
 //   * Overload        - current above limit for N s        -> latched (manual reset)
-//   * Dry run         - power below limit after start grace -> auto-retry, then latched
+//   * Underload/dry   - current below limit after start grace -> auto-retry, then latched
 //   * No level rise   - tank level not rising while pumping -> auto-retry, then latched
 //   * Max run time    - pump running too long               -> auto-retry, then latched
-//   * Over/under volt - mains outside band                  -> auto-clears when voltage recovers
+//   * Over/under volt - mains outside band (optional sensor) -> auto-clears when voltage recovers
 //   * Level sensor    - no valid reading for N s            -> auto-clears when sensor returns
-//   * Power meter     - meter lost while pump running       -> auto-clears when meter returns
+//   * Current sensor  - CT input invalid while pump running -> auto-clears when input returns
+//   * Voltage sensor  - voltage input invalid (if enabled)  -> auto-clears when input returns
 // Plus: anti short-cycle minimum off time (also applied after power-up),
 // optional sump float switch, AUTO / MANUAL / OFF modes.
 // ---------------------------------------------------------------------------
@@ -33,7 +34,8 @@ enum class Fault : uint8_t {
   OVER_VOLTAGE,
   UNDER_VOLTAGE,
   LEVEL_SENSOR,
-  POWER_METER,
+  CURRENT_SENSOR,
+  VOLTAGE_SENSOR,
 };
 
 // Why the pump is not running even though there is no fault.
@@ -45,7 +47,7 @@ enum class Hold : uint8_t {
   TANK_FULL,
   MIN_OFF_TIME,   // anti short-cycle / power-up restart delay
   SUMP_EMPTY,
-  NO_POWER_METER,
+  NO_CURRENT_SENSOR,
 };
 
 enum class Event : uint8_t { PUMP_START, PUMP_STOP, FAULT_TRIP, FAULT_CLEAR, MODE_CHANGE };
@@ -60,9 +62,9 @@ struct ControlConfig {
   float    overloadCurrentA = 8.0f;
   uint16_t overloadDelayS   = 3;
 
-  // Underload / dry run (pump running without water draws less power)
-  bool     dryRunEnabled  = true;
-  float    dryRunPowerW   = 300.0f;
+  // Underload / dry run (pump running without water draws less current)
+  bool     dryRunEnabled      = true;
+  float    underloadCurrentA  = 3.0f;
   uint16_t dryRunDelayS   = 10;
   uint16_t startGraceS    = 20;    // ignore underload while the pump primes
 
@@ -73,8 +75,8 @@ struct ControlConfig {
 
   uint16_t maxRunMin = 60;         // 0 = disabled
 
-  // Mains voltage
-  bool     voltageEnabled   = true;
+  // Mains voltage (needs the optional voltage sensor)
+  bool     voltageEnabled   = false;
   float    overVoltageV     = 260.0f;
   float    underVoltageV    = 180.0f;
   float    voltageHystV     = 5.0f;
@@ -86,15 +88,16 @@ struct ControlConfig {
   uint8_t  maxRetries    = 3;      // 0 = never auto-retry (latch immediately)
 
   uint16_t minOffS          = 60;  // anti short-cycle, also restart delay after power-up
-  uint16_t sensorTimeoutS   = 10;  // level sensor / power meter considered lost after this
-  bool     requirePowerMeter = true;
+  uint16_t sensorTimeoutS   = 10;  // level / current / voltage input considered lost after this
+  bool     requireCurrentSensor = true;
   bool     sumpFloatEnabled  = false;
 };
 
 struct Inputs {
   uint32_t nowMs = 0;
   bool  levelValid = false;  float levelPct = 0;
-  bool  powerValid = false;  float voltage = 0, current = 0, power = 0;
+  bool  currentValid = false; float current = 0;   // RMS amps
+  bool  voltageValid = false; float voltage = 0;   // RMS volts (optional sensor)
   bool  sumpHasWater = true;
 };
 
@@ -125,7 +128,8 @@ class PumpController {
   Hold     hold() const { return hold_; }
   bool     fillRequested() const { return fillRequest_; }
   bool     levelOk() const { return levelOk_; }
-  bool     powerOk() const { return powerOk_; }
+  bool     currentOk() const { return currentOk_; }
+  bool     voltageOk() const { return voltOk_; }
   float    levelPct() const { return level_; }
   uint8_t  retries() const { return retries_; }
   uint32_t runTimeS() const { return running_ ? (now_ - startMs_) / 1000 : 0; }
@@ -170,11 +174,11 @@ class PumpController {
   bool  fillRequest_ = false;
 
   // sensor tracking
-  bool  levelOk_ = false, powerOk_ = false;
-  bool  haveLevel_ = false, havePower_ = false;
-  bool  levelLost_ = false, powerLost_ = false;
-  uint32_t lastLevelMs_ = 0, lastPowerMs_ = 0;
-  float level_ = 0, volts_ = 0, amps_ = 0, watts_ = 0;
+  bool  levelOk_ = false, currentOk_ = false, voltOk_ = false;
+  bool  haveLevel_ = false, haveCurrent_ = false, haveVolt_ = false;
+  bool  levelLost_ = false, currentLost_ = false, voltLost_ = false;
+  uint32_t lastLevelMs_ = 0, lastCurrentMs_ = 0, lastVoltMs_ = 0;
+  float level_ = 0, volts_ = 0, amps_ = 0;
   bool  sumpEmpty_ = false;
   Timer sumpTimer_;
 

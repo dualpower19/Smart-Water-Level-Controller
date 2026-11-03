@@ -1,5 +1,5 @@
 // Smart Water Level Controller - ESP32
-// RS485 ultrasonic level sensor + PZEM-004T pump monitor + contactor relay,
+// RS485 ultrasonic level sensor + CT pump current (+ optional ZMPT101B voltage) + contactor relay,
 // with OLED display and Wi-Fi dashboard. See README.md for wiring.
 #include <Arduino.h>
 #include <stdarg.h>
@@ -47,6 +47,7 @@ bool App::command(Cmd c) {
 void App::applySettings() {
   pump->setConfig(settings.ctl);
   level.setConfig(settings.sensor, settings.tank);
+  elec.setConfig(settings.ct, settings.ctl.voltageEnabled);
 }
 
 // ---------------------------------------------------------------------------
@@ -60,7 +61,7 @@ static uint32_t faultSinceMs = 0;
 static bool buzzerSilenced = false;
 
 static void onPumpEvent(Event e, Fault f) {
-  const PowerReading& p = app.lastPower;
+  const ElecReading& p = app.lastElec;
   switch (e) {
     case Event::PUMP_START:
       app.log.add("Pump ON  (level %.0f%%)", app.pump->levelPct());
@@ -69,8 +70,12 @@ static void onPumpEvent(Event e, Fault f) {
       app.log.add("Pump OFF (level %.0f%%)", app.pump->levelPct());
       break;
     case Event::FAULT_TRIP:
-      app.log.add("FAULT %s%s %.0fV %.1fA %.0fW", PumpController::faultName(f),
-                  app.pump->faultLatched() ? " [LOCK]" : "", p.voltage, p.current, p.power);
+      if (app.settings.ctl.voltageEnabled)
+        app.log.add("FAULT %s%s %.1fA %.0fV", PumpController::faultName(f),
+                    app.pump->faultLatched() ? " [LOCK]" : "", p.current, p.voltage);
+      else
+        app.log.add("FAULT %s%s %.1fA", PumpController::faultName(f),
+                    app.pump->faultLatched() ? " [LOCK]" : "", p.current);
       faultSinceMs = millis();
       buzzerSilenced = false;
       break;
@@ -161,7 +166,7 @@ void setup() {
 
   if (!Display::begin()) app.log.add("OLED not found");
   app.level.begin(app.settings.sensor, app.settings.tank);
-  app.power.begin();
+  app.elec.begin(app.settings.ct, app.settings.ctl.voltageEnabled);
   WifiMgr::begin();
   WebUI::begin();
 
@@ -170,30 +175,31 @@ void setup() {
 
 void loop() {
   static uint32_t lastTick = 0, lastDisplay = 0;
-  static uint32_t levelSeq = 0, powerSeq = 0;
+  static uint32_t levelSeq = 0, elecSeq = 0;
   const uint32_t now = millis();
 
   {
     AppLock l(app);
-    app.power.poll();
-
     if (now - lastTick >= CONTROL_TICK_MS) {
       lastTick = now;
       const LevelReading lr = app.level.read();
-      const PowerReading pr = app.power.read();
+      const ElecReading er = app.elec.read();
       app.lastLevel = lr;
-      app.lastPower = pr;
+      app.lastElec = er;
       app.sumpHasWater = digitalRead(PIN_SUMP_FLOAT) == LOW;
 
       Inputs in;
       in.nowMs = now;
       in.levelValid = lr.seq != levelSeq;
       in.levelPct = lr.levelPct;
-      in.powerValid = pr.seq != powerSeq;
-      in.voltage = pr.voltage; in.current = pr.current; in.power = pr.power;
+      const bool newElec = er.seq != elecSeq;
+      in.currentValid = newElec && er.currentValid;
+      in.current = er.current;
+      in.voltageValid = newElec && er.voltageValid;
+      in.voltage = er.voltage;
       in.sumpHasWater = app.sumpHasWater;
       levelSeq = lr.seq;
-      powerSeq = pr.seq;
+      elecSeq = er.seq;
       app.pump->update(in);
 
       if ((uint8_t)app.pump->mode() != app.settings.mode) {

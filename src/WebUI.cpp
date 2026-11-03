@@ -30,7 +30,7 @@ static void sendJson(AsyncWebServerRequest* r, JsonDocument& doc, int code = 200
 
 static void fillStatus(JsonObject o) {
   const LevelReading& lr = app.lastLevel;
-  const PowerReading& pr = app.lastPower;
+  const ElecReading& er = app.lastElec;
   PumpController& p = *app.pump;
   const uint32_t now = millis();
 
@@ -58,17 +58,24 @@ static void fillStatus(JsonObject o) {
   l["stop"] = app.settings.ctl.stopLevelPct;
   l["capacity"] = app.settings.tank.capacityL;
 
-  JsonObject w = o["power"].to<JsonObject>();
-  w["ok"] = p.powerOk();
-  if (!isnan(pr.voltage)) {
-    w["v"] = serialized(String(pr.voltage, 1));
-    w["a"] = serialized(String(pr.current, 2));
-    w["w"] = serialized(String(pr.power, 0));
-    w["kwh"] = serialized(String(pr.energyKWh, 2));
-    w["hz"] = serialized(String(pr.frequency, 1));
-    w["pf"] = serialized(String(pr.pf, 2));
+  JsonObject w = o["elec"].to<JsonObject>();
+  w["ok"] = p.currentOk();
+  if (!isnan(er.current)) {
+    w["a"] = serialized(String(er.current, 2));
+    w["rawA"] = serialized(String(er.currentRawA, 3));
+    w["ctRmsV"] = serialized(String(er.ctRmsV, 4));
+    w["ctBiasV"] = serialized(String(er.ctBiasV, 3));
   }
-  w["err_n"] = pr.errCount;
+  w["samples"] = er.samples;
+  w["err_n"] = er.errCount;
+  w["vEnabled"] = app.settings.ctl.voltageEnabled;
+  w["vOk"] = p.voltageOk();
+  if (!isnan(er.voltage)) {
+    w["v"] = serialized(String(er.voltage, 1));
+    w["vtBiasV"] = serialized(String(er.vtBiasV, 3));
+  }
+  w["overA"] = app.settings.ctl.overloadCurrentA;
+  w["underA"] = app.settings.ctl.underloadCurrentA;
 
   JsonObject u = o["pump"].to<JsonObject>();
   u["on"] = p.relayOn();
@@ -95,6 +102,9 @@ static void handleCmd(AsyncWebServerRequest* r) {
   String cmd;
   if (r->hasParam("cmd", true)) cmd = r->getParam("cmd", true)->value();
   else if (r->hasParam("cmd")) cmd = r->getParam("cmd")->value();
+  float value = NAN;
+  if (r->hasParam("value", true)) value = r->getParam("value", true)->value().toFloat();
+  else if (r->hasParam("value")) value = r->getParam("value")->value().toFloat();
 
   bool ok = true;
   String msg = "ok";
@@ -118,7 +128,42 @@ static void handleCmd(AsyncWebServerRequest* r) {
         msg = String(cmd == "cal_empty" ? "empty" : "full") + " = " + String(d, 1) + " cm";
       }
     }
-    else if (cmd == "energy_reset") ok = app.power.resetEnergy();
+    else if (cmd == "cal_ct_zero") {
+      // Pump must be OFF: whatever the CT reads now is noise / offset.
+      const ElecReading& e = app.lastElec;
+      if (app.pump->relayOn()) { ok = false; msg = "stop the pump first"; }
+      else if (!e.currentValid || isnan(e.currentRawA)) { ok = false; msg = "CT input invalid (check bias network)"; }
+      else {
+        app.settings.ct.zeroA = e.currentRawA;
+        SettingsStore::validate(app.settings);
+        app.applySettings(); app.saveRequested = true;
+        msg = "zero = " + String(app.settings.ct.zeroA, 3) + " A";
+      }
+    }
+    else if (cmd == "cal_ct") {
+      // Pump running; value = current measured with a clamp meter on the same wire.
+      const ElecReading& e = app.lastElec;
+      if (!(value > 0.2f)) { ok = false; msg = "enter the clamp-meter reading in A"; }
+      else if (!e.currentValid || !(e.ctRmsV > 0.005f)) { ok = false; msg = "signal too small - is the pump running?"; }
+      else {
+        const float z = app.settings.ct.zeroA;
+        app.settings.ct.ampsPerVolt = sqrtf(value * value + z * z) / e.ctRmsV;
+        SettingsStore::validate(app.settings);
+        app.applySettings(); app.saveRequested = true;
+        msg = "CT factor = " + String(app.settings.ct.ampsPerVolt, 2) + " A/V";
+      }
+    }
+    else if (cmd == "cal_volt") {
+      const ElecReading& e = app.lastElec;
+      if (!(value > 50.0f)) { ok = false; msg = "enter the mains voltage from a meter"; }
+      else if (!e.voltageValid || !(e.vtRmsV > 0.01f)) { ok = false; msg = "no voltage signal (enable + wire ZMPT101B)"; }
+      else {
+        app.settings.ct.voltsPerVolt = value / e.vtRmsV;
+        SettingsStore::validate(app.settings);
+        app.applySettings(); app.saveRequested = true;
+        msg = "voltage factor = " + String(app.settings.ct.voltsPerVolt, 1) + " V/V";
+      }
+    }
     else if (cmd == "restart") { app.restartRequested = true; app.restartAtMs = millis() + 500; }
     else if (cmd == "factory_reset") {
       SettingsStore::factoryReset(app.settings);

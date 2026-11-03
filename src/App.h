@@ -5,7 +5,7 @@
 #include "Settings.h"
 #include "PumpController.h"
 #include "LevelSensor.h"
-#include "PowerMonitor.h"
+#include "CurrentSensor.h"
 
 struct LogEntry {
   uint32_t epoch;   // 0 if time not synced yet
@@ -30,11 +30,11 @@ struct App {
   Settings settings;
   wlc::PumpController* pump = nullptr;
   LevelSensor level;
-  PowerMonitor power;
+  CurrentSensor elec;
   EventLog log;
 
   LevelReading lastLevel;
-  PowerReading lastPower;
+  ElecReading lastElec;
   bool sumpHasWater = true;
 
   // deferred work requested by the web server, executed in loop()
@@ -48,7 +48,7 @@ struct App {
 
   // Applies a command immediately (caller must hold the lock). Returns false if refused.
   bool command(Cmd c);
-  void applySettings();  // push settings into controller + sensor (caller holds lock)
+  void applySettings();  // push settings into controller + sensors (caller holds lock)
 };
 
 struct AppLock {

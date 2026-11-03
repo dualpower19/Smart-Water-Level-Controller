@@ -52,18 +52,19 @@ void render() {
   if (!present) return;
 
   // Snapshot state under the lock, then draw without it.
-  float pct, litres, volts, amps, watts;
-  bool levelValid, powerValid, pumpOn, latched;
+  float pct, litres, volts, amps;
+  bool levelValid, currentValid, voltsShown, pumpOn, latched;
   Fault fault; Hold hold; Mode mode;
   uint32_t retryIn, minOff, runS;
   {
     AppLock l(app);
     const LevelReading& lr = app.lastLevel;
-    const PowerReading& pr = app.lastPower;
+    const ElecReading& er = app.lastElec;
     levelValid = app.pump->levelOk();
     pct = lr.levelPct; litres = lr.litres;
-    powerValid = app.pump->powerOk();
-    volts = pr.voltage; amps = pr.current; watts = pr.power;
+    currentValid = app.pump->currentOk();
+    voltsShown = app.settings.ctl.voltageEnabled && app.pump->voltageOk();
+    volts = er.voltage; amps = er.current;
     pumpOn = app.pump->relayOn();
     fault = app.pump->fault(); latched = app.pump->faultLatched();
     hold = app.pump->hold(); mode = app.pump->mode();
@@ -96,12 +97,12 @@ void render() {
   oled.print(buf);
 
   oled.setCursor(X, 38);
-  if (powerValid) snprintf(buf, sizeof(buf), "%.0fV %.1fA", volts, amps);
-  else snprintf(buf, sizeof(buf), "meter offline");
+  if (currentValid) snprintf(buf, sizeof(buf), "I %.2f A", amps);
+  else snprintf(buf, sizeof(buf), "CT fault");
   oled.print(buf);
-  if (powerValid && pumpOn) {
+  if (voltsShown) {
     oled.setCursor(X, 47);
-    snprintf(buf, sizeof(buf), "%.0fW", watts);
+    snprintf(buf, sizeof(buf), "V %.0f V", volts);
     oled.print(buf);
   }
 

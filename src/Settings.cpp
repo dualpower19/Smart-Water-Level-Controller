@@ -3,21 +3,22 @@
 #include "config.h"
 
 // Bump when the Settings layout changes; a mismatch loads factory defaults.
-static constexpr uint32_t SETTINGS_MAGIC = 0x574C4301;  // "WLC" v1
+static constexpr uint32_t SETTINGS_MAGIC = 0x574C4302;  // "WLC" v2 (CT current input)
 
 // ---- field lists (name in JSON == member name) ------------------------------
 #define CTL_FIELDS(X)                                                        \
   X(startLevelPct) X(stopLevelPct)                                           \
   X(overloadEnabled) X(overloadCurrentA) X(overloadDelayS)                   \
-  X(dryRunEnabled) X(dryRunPowerW) X(dryRunDelayS) X(startGraceS)            \
+  X(dryRunEnabled) X(underloadCurrentA) X(dryRunDelayS) X(startGraceS)            \
   X(noRiseEnabled) X(noRiseWindowMin) X(noRiseMinPct) X(maxRunMin)           \
   X(voltageEnabled) X(overVoltageV) X(underVoltageV) X(voltageHystV)         \
   X(voltageTripS) X(voltageRestoreS)                                         \
   X(retryDelayMin) X(maxRetries) X(minOffS) X(sensorTimeoutS)                \
-  X(requirePowerMeter) X(sumpFloatEnabled)
+  X(requireCurrentSensor) X(sumpFloatEnabled)
 
 #define TANK_FIELDS(X)   X(emptyDistCm) X(fullDistCm) X(capacityL)
 #define SENSOR_FIELDS(X) X(address) X(baud) X(function) X(reg) X(unitMm) X(median)
+#define CT_FIELDS(X)     X(ampsPerVolt) X(zeroA) X(minA) X(voltsPerVolt) X(mainsHz)
 
 namespace {
 struct Blob {
@@ -38,7 +39,7 @@ void validate(Settings& s) {
   if (c.stopLevelPct < c.startLevelPct + 5.0f) c.stopLevelPct = min(100.0f, c.startLevelPct + 5.0f);
   c.overloadCurrentA = clampv(c.overloadCurrentA, 0.1f, 100.0f);
   c.overloadDelayS   = clampv<uint16_t>(c.overloadDelayS, 1, 60);
-  c.dryRunPowerW     = clampv(c.dryRunPowerW, 0.0f, 20000.0f);
+  c.underloadCurrentA = clampv(c.underloadCurrentA, 0.0f, c.overloadCurrentA * 0.95f);
   c.dryRunDelayS     = clampv<uint16_t>(c.dryRunDelayS, 1, 300);
   c.startGraceS      = clampv<uint16_t>(c.startGraceS, 0, 600);
   c.noRiseWindowMin  = clampv<uint16_t>(c.noRiseWindowMin, 1, 240);
@@ -66,6 +67,13 @@ void validate(Settings& s) {
   if (n.function != 3 && n.function != 4) n.function = 3;
   n.unitMm = clampv(n.unitMm, 0.01f, 100.0f);
   n.median = clampv<uint8_t>(n.median, 1, 9);
+
+  auto& k = s.ct;
+  k.ampsPerVolt  = clampv(k.ampsPerVolt, 0.1f, 2000.0f);
+  k.zeroA        = clampv(k.zeroA, 0.0f, 5.0f);
+  k.minA         = clampv(k.minA, 0.0f, 5.0f);
+  k.voltsPerVolt = clampv(k.voltsPerVolt, 1.0f, 5000.0f);
+  if (k.mainsHz != 50 && k.mainsHz != 60) k.mainsHz = 50;
 
   if (s.mode > 2) s.mode = 0;
   if (!s.net.hostname[0]) strlcpy(s.net.hostname, DEFAULT_HOSTNAME, sizeof(s.net.hostname));
@@ -116,6 +124,10 @@ void toJson(const Settings& s, JsonObject out) {
 #define X(f) n[#f] = s.sensor.f;
   SENSOR_FIELDS(X)
 #undef X
+  JsonObject k = out["ct"].to<JsonObject>();
+#define X(f) k[#f] = s.ct.f;
+  CT_FIELDS(X)
+#undef X
   JsonObject w = out["net"].to<JsonObject>();
   w["ssid"] = s.net.ssid;
   w["hostname"] = s.net.hostname;
@@ -141,6 +153,12 @@ bool fromJson(Settings& s, JsonObjectConst in) {
   if (n) {
 #define X(f) if (!n[#f].isNull()) s.sensor.f = n[#f].as<decltype(s.sensor.f)>();
     SENSOR_FIELDS(X)
+#undef X
+  }
+  JsonObjectConst k = in["ct"];
+  if (k) {
+#define X(f) if (!k[#f].isNull()) s.ct.f = k[#f].as<decltype(s.ct.f)>();
+    CT_FIELDS(X)
 #undef X
   }
   JsonObjectConst w = in["net"];

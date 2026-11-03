@@ -7,7 +7,9 @@
 //  GET  /api/config       settings (passwords omitted)
 //  POST /api/config       JSON body, partial update            [auth]
 //  POST /api/cmd?cmd=X    start|stop|reset|auto|manual|off|
-//                         cal_empty|cal_full|energy_reset|restart|factory_reset  [auth]
+//                         cal_empty|cal_full|cal_ct_zero|restart|factory_reset   [auth]
+//  POST /api/cmd?cmd=cal_ct&value=5.2   CT factor from a clamp-meter reading (pump running) [auth]
+//  POST /api/cmd?cmd=cal_volt&value=231 voltage factor from a meter reading             [auth]
 //  POST /api/update       multipart firmware.bin (OTA)         [auth]
 //
 // [auth] = HTTP Basic, user "admin", password = admin password from settings.

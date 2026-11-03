@@ -9,8 +9,8 @@ struct Sim {
   ControlConfig cfg;
   PumpController* pc = nullptr;
   uint32_t now;
-  float level = 50, volts = 230, amps = 5, watts = 900;
-  bool levelValid = true, powerValid = true, sump = true;
+  float level = 50, volts = 230, amps = 5;
+  bool levelValid = true, currentValid = true, voltageValid = true, sump = true;
 
   explicit Sim(uint32_t start = 1000) : now(start) {
     cfg.minOffS = 5;
@@ -29,7 +29,8 @@ struct Sim {
     Inputs in;
     in.nowMs = now;
     in.levelValid = levelValid; in.levelPct = level;
-    in.powerValid = powerValid; in.voltage = volts; in.current = amps; in.power = watts;
+    in.currentValid = currentValid; in.current = amps;
+    in.voltageValid = voltageValid; in.voltage = volts;
     in.sumpHasWater = sump;
     pc->update(in);
   }
@@ -38,7 +39,6 @@ struct Sim {
   void runLoaded(uint32_t ms) {
     for (uint32_t t = 0; t < ms; t += 200) {
       amps = pc->relayOn() ? 5.0f : 0.0f;
-      watts = pc->relayOn() ? 900.0f : 0.0f;
       step(200);
     }
   }
@@ -78,7 +78,7 @@ void test_overload_latches_and_needs_reset() {
   TEST_ASSERT_FALSE(s.pc->relayOn());
   TEST_ASSERT_EQUAL(Fault::OVERLOAD, s.pc->fault());
   TEST_ASSERT_TRUE(s.pc->faultLatched());
-  s.amps = 0; s.watts = 0; s.run(120000);
+  s.amps = 0; s.run(120000);
   TEST_ASSERT_EQUAL(Fault::OVERLOAD, s.pc->fault());
   TEST_ASSERT_FALSE(s.pc->requestStart());
   s.pc->resetFault();
@@ -100,7 +100,7 @@ void test_dry_run_ignored_during_grace_then_trips() {
   Sim s; s.level = 10; s.begin();
   s.runLoaded(6000);
   TEST_ASSERT_TRUE(s.pc->relayOn());
-  s.watts = 100; s.amps = 1;   // dry from the start
+  s.amps = 1.8f;               // dry from the start (below 3 A)
   s.run(9000);                 // still within 10 s grace
   TEST_ASSERT_TRUE(s.pc->relayOn());
   s.run(7000);                 // grace over + 5 s delay
@@ -115,7 +115,7 @@ void test_dry_run_retries_then_latches() {
     // wait for (re)start: power-up delay or retry delay
     for (int i = 0; i < 400 && !s.pc->relayOn(); i++) s.step(200);
     TEST_ASSERT_TRUE_MESSAGE(s.pc->relayOn(), "pump should (re)start");
-    s.watts = 50; s.amps = 0.5f;
+    s.amps = 1.5f;
     s.run(20000);
     TEST_ASSERT_EQUAL(Fault::DRY_RUN, s.pc->fault());
     if (attempt <= 2) {
@@ -171,7 +171,7 @@ void test_no_reading_at_boot_waits_then_faults() {
 }
 
 void test_under_voltage_trips_and_restores_after_delay() {
-  Sim s; s.cfg.voltageRestoreS = 30; s.level = 10; s.begin();
+  Sim s; s.cfg.voltageEnabled = true; s.cfg.voltageRestoreS = 30; s.level = 10; s.begin();
   s.runLoaded(6000);
   TEST_ASSERT_TRUE(s.pc->relayOn());
   s.volts = 170; s.runLoaded(5400);
@@ -188,7 +188,7 @@ void test_under_voltage_trips_and_restores_after_delay() {
 }
 
 void test_over_voltage_blocks_start_when_idle() {
-  Sim s; s.level = 10; s.volts = 275; s.begin();
+  Sim s; s.cfg.voltageEnabled = true; s.level = 10; s.volts = 275; s.begin();
   s.run(10000);
   TEST_ASSERT_FALSE(s.pc->relayOn());
   TEST_ASSERT_EQUAL(Fault::OVER_VOLTAGE, s.pc->fault());
@@ -241,15 +241,36 @@ void test_sump_empty_holds_pump() {
   TEST_ASSERT_TRUE(s.pc->relayOn());
 }
 
-void test_power_meter_loss_while_running() {
+void test_current_sensor_loss_while_running() {
   Sim s; s.level = 10; s.begin();
   s.runLoaded(6000);
   TEST_ASSERT_TRUE(s.pc->relayOn());
-  s.powerValid = false; s.run(11000);
+  s.currentValid = false; s.run(11000);
   TEST_ASSERT_FALSE(s.pc->relayOn());
-  TEST_ASSERT_EQUAL(Fault::POWER_METER, s.pc->fault());
-  s.powerValid = true; s.runLoaded(400);
+  TEST_ASSERT_EQUAL(Fault::CURRENT_SENSOR, s.pc->fault());
+  s.currentValid = true; s.runLoaded(400);
   TEST_ASSERT_EQUAL(Fault::NONE, s.pc->fault());
+}
+
+void test_disconnected_ct_reads_zero_trips_underload() {
+  Sim s; s.level = 10; s.begin();
+  s.runLoaded(6000);
+  TEST_ASSERT_TRUE(s.pc->relayOn());
+  s.amps = 0; s.run(16000);   // CT unplugged: valid input, but 0 A
+  TEST_ASSERT_EQUAL(Fault::DRY_RUN, s.pc->fault());
+  TEST_ASSERT_FALSE(s.pc->relayOn());
+}
+
+void test_voltage_sensor_optional() {
+  Sim s; s.voltageValid = false; s.level = 10; s.begin();   // not fitted, disabled
+  s.runLoaded(20000);
+  TEST_ASSERT_TRUE(s.pc->relayOn());
+  TEST_ASSERT_EQUAL(Fault::NONE, s.pc->fault());
+
+  Sim e; e.cfg.voltageEnabled = true; e.voltageValid = false; e.level = 10; e.begin();
+  e.runLoaded(11000);                                      // enabled but no signal
+  TEST_ASSERT_EQUAL(Fault::VOLTAGE_SENSOR, e.pc->fault());
+  TEST_ASSERT_FALSE(e.pc->relayOn());
 }
 
 void test_max_runtime() {
@@ -286,7 +307,9 @@ int main(int, char**) {
   RUN_TEST(test_modes);
   RUN_TEST(test_manual_stop_in_auto);
   RUN_TEST(test_sump_empty_holds_pump);
-  RUN_TEST(test_power_meter_loss_while_running);
+  RUN_TEST(test_current_sensor_loss_while_running);
+  RUN_TEST(test_disconnected_ct_reads_zero_trips_underload);
+  RUN_TEST(test_voltage_sensor_optional);
   RUN_TEST(test_max_runtime);
   RUN_TEST(test_millis_rollover);
   return UNITY_END();

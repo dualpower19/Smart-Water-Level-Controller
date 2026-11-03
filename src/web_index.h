@@ -24,6 +24,7 @@ main{max-width:980px;margin:0 auto;padding:14px;display:grid;gap:14px;grid-templ
 .big{font-size:44px;font-weight:700;line-height:1}.mut{color:var(--mut)}
 .pill{display:inline-block;padding:3px 10px;border-radius:99px;font-weight:600;font-size:13px;background:var(--line)}
 .on{background:var(--ok);color:#04130a}.flt{background:var(--bad);color:#fff}.hold{background:var(--warn);color:#1c1300}
+.bar{position:relative;height:10px;border-radius:5px;background:var(--line);margin:10px 0 4px;overflow:hidden}.bar div{height:100%;width:0;background:var(--acc);transition:width .5s}.bar i{position:absolute;top:0;bottom:0;width:2px}#aunder{background:var(--warn)}#aover{background:var(--bad)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px}.grid2 div span{display:block;font-size:12px;color:var(--mut)}.grid2 div b{font-size:18px}
 .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 button{font:inherit;padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:var(--line);color:var(--fg);cursor:pointer}
@@ -55,11 +56,12 @@ details{border-top:1px solid var(--line);padding:8px 0}summary{cursor:pointer;fo
   <div class="mut" style="font-size:12px;margin-top:8px">AUTO refills at the start level. Stop cancels the current fill; use OFF to keep the pump off.</div>
  </section>
  <section class="card">
-  <h3>Power</h3>
-  <div class="grid2">
-   <div><span>Voltage</span><b id="v">-</b></div><div><span>Current</span><b id="a">-</b></div>
-   <div><span>Power</span><b id="w">-</b></div><div><span>Power factor</span><b id="pf">-</b></div>
-   <div><span>Energy</span><b id="kwh">-</b></div><div><span>Frequency</span><b id="hz">-</b></div>
+  <h3>Pump current</h3>
+  <div class="big" id="a" style="font-size:36px">-</div>
+  <div class="bar"><div id="abar"></div><i id="aunder"></i><i id="aover"></i></div>
+  <div class="mut" style="font-size:12px" id="alim"></div>
+  <div class="grid2" style="margin-top:10px">
+   <div><span>Mains voltage</span><b id="v">-</b></div><div><span>CT bias / signal</span><b id="ctb" style="font-size:15px">-</b></div>
    <div><span>Starts (since boot)</span><b id="starts">-</b></div><div><span>Run time (since boot)</span><b id="trun">-</b></div>
   </div>
  </section>
@@ -72,9 +74,13 @@ details{border-top:1px solid var(--line);padding:8px 0}summary{cursor:pointer;fo
   <details><summary>Calibration</summary>
    <p class="mut" style="font-size:13px">Fill or drain the tank to the level you want as 0% / 100%, then press the matching button. The current distance reading is stored.</p>
    <div class="btns"><button onclick="cmd('cal_empty',1)">Set current reading as EMPTY</button><button onclick="cmd('cal_full',1)">Set current reading as FULL</button></div>
+   <p class="mut" style="font-size:13px"><b>Current transformer:</b> 1) with the pump OFF press <i>Zero CT</i>. 2) Run the pump, measure the same wire with a clamp meter, type the reading and press <i>Calibrate CT</i>.</p>
+   <div class="btns"><button onclick="cmd('cal_ct_zero',1)">Zero CT (pump off)</button><input id="calA" type="number" step="0.01" placeholder="clamp meter A" style="width:130px;padding:6px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg)"><button onclick="calv('cal_ct','calA')">Calibrate CT</button></div>
+   <p class="mut" style="font-size:13px"><b>Voltage sensor</b> (if fitted): type the mains voltage from a meter.</p>
+   <div class="btns"><input id="calV" type="number" step="0.1" placeholder="meter V" style="width:130px;padding:6px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg)"><button onclick="calv('cal_volt','calV')">Calibrate voltage</button></div>
   </details>
   <details><summary>System</summary>
-   <div class="btns"><button onclick="cmd('energy_reset',1)">Reset energy counter</button><button onclick="cmd('restart',1)">Restart</button><button class="d" onclick="cmd('factory_reset',1)">Factory reset</button><button onclick="logout()">Forget password</button></div>
+   <div class="btns"><button onclick="cmd('restart',1)">Restart</button><button class="d" onclick="cmd('factory_reset',1)">Factory reset</button><button onclick="logout()">Forget password</button></div>
    <p class="mut" style="font-size:13px">Firmware update (.pio/build/esp32dev/firmware.bin):</p>
    <input type="file" id="fw" accept=".bin"> <button onclick="ota()">Upload</button> <span id="otap" class="mut"></span>
    <p class="mut" style="font-size:12px" id="fwv"></p>
@@ -103,13 +109,14 @@ async function cmd(c,quiet){
  if(CONFIRM[c]&&!confirm(CONFIRM[c]))return;
  try{const r=await api('POST','/api/cmd?cmd='+c);toast(r.msg||(r.ok?'ok':'failed'));if(c.startsWith('cal'))loadCfg();poll()}catch(e){toast(e.message)}
 }
+async function calv(c,id){const v=$(id).value;if(!v)return toast('Enter a value first');try{const r=await api('POST','/api/cmd?cmd='+c+'&value='+encodeURIComponent(v));toast(r.msg);loadCfg()}catch(e){toast(e.message)}}
 document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>cmd(b.dataset.m));
 const hms=s=>{s=s|0;const h=s/3600|0,m=(s%3600)/60|0,x=s%60;return(h?h+'h ':'')+(h||m?m+'m ':'')+x+'s'};
 const fmt=(v,u)=>v===undefined?'-':v+' '+u;
 async function poll(){
  try{
   const s=await (await fetch('/api/status')).json();
-  const L=s.level,P=s.power,U=s.pump;
+  const L=s.level,E=s.elec,U=s.pump;
   $('net').textContent=(s.ap?'Setup AP · ':'')+s.ip+(s.rssi?' · '+s.rssi+' dBm':'')+' · '+s.host+'.local';
   $('clock').textContent=s.time?new Date(s.time*1000).toLocaleString():'up '+hms(s.uptime);
   const pct=L.ok&&L.pct!==undefined?L.pct:null;
@@ -123,13 +130,18 @@ async function poll(){
   if(U.fault){ps.textContent='FAULT';ps.className='pill flt'}
   else if(U.on){ps.textContent='RUNNING '+hms(U.runS);ps.className='pill on'}
   else{ps.textContent='STOPPED';ps.className='pill'+(U.fill?' hold':'')}
-  $('phold').textContent=U.fault?'':(U.hold+(U.minOff?' ('+U.minOff+' s)':''));
+  $('phold').textContent=U.fault||U.on?'':(U.hold+(U.minOff?' ('+U.minOff+' s)':''));
   $('faultbox').style.display=U.fault?'block':'none';
   $('fname').textContent=U.faultName+(U.latched?' — locked, press Reset':'');
   $('fdetail').textContent=U.retryIn?('Auto retry in '+hms(U.retryIn)+' · attempt '+U.retries):(U.latched?'':'Clears automatically when the condition is gone');
-  document.querySelectorAll('.seg button').forEach(b=>b.classList.toggle('sel',b.dataset.m.toUpperCase()===U.mode));
-  $('v').textContent=P.ok?fmt(P.v,'V'):'offline';$('a').textContent=P.ok?fmt(P.a,'A'):'-';$('w').textContent=P.ok?fmt(P.w,'W'):'-';
-  $('pf').textContent=P.ok?(P.pf??'-'):'-';$('kwh').textContent=P.ok?fmt(P.kwh,'kWh'):'-';$('hz').textContent=P.ok?fmt(P.hz,'Hz'):'-';
+  async function calv(c,id){const v=$(id).value;if(!v)return toast('Enter a value first');try{const r=await api('POST','/api/cmd?cmd='+c+'&value='+encodeURIComponent(v));toast(r.msg);loadCfg()}catch(e){toast(e.message)}}
+document.querySelectorAll('.seg button').forEach(b=>b.classList.toggle('sel',b.dataset.m.toUpperCase()===U.mode));
+  $('a').textContent=E.ok?fmt(E.a,'A'):'CT fault';
+  const full=Math.max(E.overA*1.25,1);$('abar').style.width=Math.min(100,(E.a||0)/full*100)+'%';
+  $('aunder').style.left=(E.underA/full*100)+'%';$('aover').style.left=(E.overA/full*100)+'%';
+  $('alim').textContent='underload < '+E.underA+' A · overload > '+E.overA+' A';
+  $('v').textContent=E.vEnabled?(E.vOk?fmt(E.v,'V'):'sensor fault'):'not fitted';
+  $('ctb').textContent=(E.ctBiasV??'-')+' V / '+(E.ctRmsV!==undefined?(E.ctRmsV*1000).toFixed(1)+' mV':'-');
   $('starts').textContent=U.starts;$('trun').textContent=hms(U.totalRunS);
   $('fwv').textContent='Firmware v'+s.fw;
  }catch(e){$('net').textContent='connection lost…'}
@@ -142,10 +154,11 @@ async function events(){
 const S=[
  ['Pump control',[['ctl.startLevelPct','Start filling at (%)'],['ctl.stopLevelPct','Stop at (%)'],['ctl.minOffS','Min. off time / power-up delay (s)'],['ctl.maxRunMin','Max run time (min, 0 = off)']]],
  ['Overload',[['ctl.overloadEnabled','Enabled','b'],['ctl.overloadCurrentA','Trip above current (A)'],['ctl.overloadDelayS','Trip delay (s)']]],
- ['Dry run / underload',[['ctl.dryRunEnabled','Enabled','b'],['ctl.dryRunPowerW','Trip below power (W)'],['ctl.dryRunDelayS','Trip delay (s)'],['ctl.startGraceS','Priming grace after start (s)'],['ctl.noRiseEnabled','Level-not-rising check','b'],['ctl.noRiseWindowMin','Check window (min)'],['ctl.noRiseMinPct','Min. rise per window (%)'],['ctl.retryDelayMin','Auto-retry after (min)'],['ctl.maxRetries','Max retries (0 = lock at once)'],['ctl.sumpFloatEnabled','Sump float switch fitted','b']]],
- ['Voltage',[['ctl.voltageEnabled','Enabled','b'],['ctl.overVoltageV','Over voltage (V)'],['ctl.underVoltageV','Under voltage (V)'],['ctl.voltageHystV','Hysteresis (V)'],['ctl.voltageTripS','Trip delay (s)'],['ctl.voltageRestoreS','Restore delay (s)']]],
+ ['Dry run / underload',[['ctl.dryRunEnabled','Enabled','b'],['ctl.underloadCurrentA','Trip below current (A)'],['ctl.dryRunDelayS','Trip delay (s)'],['ctl.startGraceS','Priming grace after start (s)'],['ctl.noRiseEnabled','Level-not-rising check','b'],['ctl.noRiseWindowMin','Check window (min)'],['ctl.noRiseMinPct','Min. rise per window (%)'],['ctl.retryDelayMin','Auto-retry after (min)'],['ctl.maxRetries','Max retries (0 = lock at once)'],['ctl.sumpFloatEnabled','Sump float switch fitted','b']]],
+ ['Current transformer',[['ct.ampsPerVolt','Amps per ADC volt RMS (SCT-013-030 = 30)'],['ct.zeroA','Zero offset (A)'],['ct.minA','Show as 0 below (A)'],['ct.mainsHz','Mains frequency (Hz)'],['ctl.requireCurrentSensor','Stop pump if CT input invalid','b']]],
+ ['Voltage (ZMPT101B, optional)',[['ctl.voltageEnabled','Sensor fitted - enable protection','b'],['ct.voltsPerVolt','Volts per ADC volt RMS'],['ctl.overVoltageV','Over voltage (V)'],['ctl.underVoltageV','Under voltage (V)'],['ctl.voltageHystV','Hysteresis (V)'],['ctl.voltageTripS','Trip delay (s)'],['ctl.voltageRestoreS','Restore delay (s)']]],
  ['Tank',[['tank.emptyDistCm','Sensor distance when EMPTY (cm)'],['tank.fullDistCm','Sensor distance when FULL (cm)'],['tank.capacityL','Usable capacity (L)']]],
- ['Level sensor (RS485 Modbus)',[['sensor.address','Slave address'],['sensor.baud','Baud rate'],['sensor.function','Function (3 = holding, 4 = input)'],['sensor.reg','Distance register','h'],['sensor.unitMm','mm per count (1 = mm, 10 = cm)'],['sensor.median','Median filter samples (1-9)'],['ctl.sensorTimeoutS','Sensor / meter timeout (s)'],['ctl.requirePowerMeter','Stop pump if power meter offline','b']]],
+ ['Level sensor (RS485 Modbus)',[['sensor.address','Slave address'],['sensor.baud','Baud rate'],['sensor.function','Function (3 = holding, 4 = input)'],['sensor.reg','Distance register','h'],['sensor.unitMm','mm per count (1 = mm, 10 = cm)'],['sensor.median','Median filter samples (1-9)'],['ctl.sensorTimeoutS','Sensor timeout (s)']]],
  ['Network & security',[['net.ssid','Wi-Fi SSID','s'],['net.pass','Wi-Fi password (blank = keep)','p'],['net.hostname','Hostname','s'],['net.tz','Time zone (POSIX, e.g. IST-5:30)','s'],['net.adminPass','New admin password (blank = keep)','p']]]
 ];
 let CFG=null;

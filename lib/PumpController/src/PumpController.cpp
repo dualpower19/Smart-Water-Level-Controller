@@ -8,7 +8,8 @@ void PumpController::begin(uint32_t nowMs) {
   now_ = nowMs;
   lastStopMs_ = nowMs;   // minimum off time doubles as a power-up restart delay
   lastLevelMs_ = nowMs;  // sensor timeouts are measured from boot until the first reading
-  lastPowerMs_ = nowMs;
+  lastCurrentMs_ = nowMs;
+  lastVoltMs_ = nowMs;
 }
 
 void PumpController::ingest(const Inputs& in) {
@@ -19,12 +20,14 @@ void PumpController::ingest(const Inputs& in) {
   levelLost_ = (now_ - lastLevelMs_) > timeout;
   levelOk_ = haveLevel_ && !levelLost_;
 
-  if (in.powerValid) {
-    volts_ = in.voltage; amps_ = in.current; watts_ = in.power;
-    lastPowerMs_ = now_; havePower_ = true;
-  }
-  powerLost_ = (now_ - lastPowerMs_) > timeout;
-  powerOk_ = havePower_ && !powerLost_;
+  if (in.currentValid) { amps_ = in.current; lastCurrentMs_ = now_; haveCurrent_ = true; }
+  currentLost_ = (now_ - lastCurrentMs_) > timeout;
+  currentOk_ = haveCurrent_ && !currentLost_;
+
+  if (in.voltageValid) { volts_ = in.voltage; lastVoltMs_ = now_; haveVolt_ = true; }
+  if (!cfg_.voltageEnabled) lastVoltMs_ = now_;   // don't time out a sensor that isn't fitted
+  voltLost_ = (now_ - lastVoltMs_) > timeout;
+  voltOk_ = haveVolt_ && !voltLost_;
 
   sumpEmpty_ = cfg_.sumpFloatEnabled &&
                sumpTimer_.held(!in.sumpHasWater, now_, SUMP_DEBOUNCE_MS);
@@ -33,7 +36,7 @@ void PumpController::ingest(const Inputs& in) {
   if (!cfg_.voltageEnabled) {
     vstate_ = VState::NORMAL;
     vBadTimer_.reset(); vGoodTimer_.reset();
-  } else if (powerOk_ && in.powerValid) {
+  } else if (voltOk_ && in.voltageValid) {
     const float v = volts_;
     if (vstate_ == VState::NORMAL) {
       const bool over = v > cfg_.overVoltageV;
@@ -64,7 +67,8 @@ void PumpController::recoverFaults() {
     case Fault::LEVEL_SENSOR:  clear = levelOk_; break;
     case Fault::OVER_VOLTAGE:
     case Fault::UNDER_VOLTAGE: clear = vstate_ == VState::NORMAL; break;
-    case Fault::POWER_METER:   clear = powerOk_; break;
+    case Fault::CURRENT_SENSOR: clear = currentOk_; break;
+    case Fault::VOLTAGE_SENSOR: clear = !cfg_.voltageEnabled || voltOk_; break;
     case Fault::DRY_RUN:
     case Fault::NO_RISE:
     case Fault::MAX_RUNTIME:
@@ -119,6 +123,7 @@ void PumpController::update(const Inputs& in) {
   // ---- Condition faults (checked whether or not the pump is running) ----
   if (fault_ == Fault::NONE) {
     if (levelLost_)                      trip(Fault::LEVEL_SENSOR);
+    else if (cfg_.voltageEnabled && voltLost_) trip(Fault::VOLTAGE_SENSOR);
     else if (vstate_ == VState::OVER)    trip(Fault::OVER_VOLTAGE);
     else if (vstate_ == VState::UNDER)   trip(Fault::UNDER_VOLTAGE);
   }
@@ -126,15 +131,15 @@ void PumpController::update(const Inputs& in) {
   // ---- Running protections ----
   if (fault_ == Fault::NONE && running_) {
     const uint32_t run = now_ - startMs_;
-    if (cfg_.requirePowerMeter && powerLost_) {
-      trip(Fault::POWER_METER);
-    } else if (powerOk_ && cfg_.overloadEnabled &&
+    if (cfg_.requireCurrentSensor && currentLost_) {
+      trip(Fault::CURRENT_SENSOR);
+    } else if (currentOk_ && cfg_.overloadEnabled &&
                overTimer_.held(amps_ > cfg_.overloadCurrentA, now_,
                                (uint32_t)cfg_.overloadDelayS * 1000UL)) {
       trip(Fault::OVERLOAD);
-    } else if (powerOk_ && cfg_.dryRunEnabled &&
+    } else if (currentOk_ && cfg_.dryRunEnabled &&
                run >= (uint32_t)cfg_.startGraceS * 1000UL &&
-               dryTimer_.held(watts_ < cfg_.dryRunPowerW, now_,
+               dryTimer_.held(amps_ < cfg_.underloadCurrentA, now_,
                               (uint32_t)cfg_.dryRunDelayS * 1000UL)) {
       trip(Fault::DRY_RUN);
     } else if (cfg_.maxRunMin > 0 && run >= (uint32_t)cfg_.maxRunMin * 60000UL) {
@@ -175,7 +180,7 @@ void PumpController::update(const Inputs& in) {
   else if (level_ >= cfg_.stopLevelPct)                     h = Hold::TANK_FULL;
   else if (!fillRequest_)                                   h = Hold::IDLE;
   else if (sumpEmpty_)                                      h = Hold::SUMP_EMPTY;
-  else if (!running_ && cfg_.requirePowerMeter && !powerOk_) h = Hold::NO_POWER_METER;
+  else if (!running_ && cfg_.requireCurrentSensor && !currentOk_) h = Hold::NO_CURRENT_SENSOR;
   else if (!running_ && minOffRemainingS() > 0)             h = Hold::MIN_OFF_TIME;
   hold_ = h;
 
@@ -231,13 +236,14 @@ const char* PumpController::faultName(Fault f) {
   switch (f) {
     case Fault::NONE:          return "None";
     case Fault::OVERLOAD:      return "Overload";
-    case Fault::DRY_RUN:       return "Dry run (underload)";
+    case Fault::DRY_RUN:       return "Underload/dry run";
     case Fault::NO_RISE:       return "Level not rising";
     case Fault::MAX_RUNTIME:   return "Max run time";
     case Fault::OVER_VOLTAGE:  return "Over voltage";
     case Fault::UNDER_VOLTAGE: return "Under voltage";
     case Fault::LEVEL_SENSOR:  return "Level sensor fault";
-    case Fault::POWER_METER:   return "Power meter fault";
+    case Fault::CURRENT_SENSOR: return "Current sensor fault";
+    case Fault::VOLTAGE_SENSOR: return "Voltage sensor fault";
   }
   return "?";
 }
@@ -251,7 +257,7 @@ const char* PumpController::holdName(Hold h) {
     case Hold::TANK_FULL:      return "Tank full";
     case Hold::MIN_OFF_TIME:   return "Restart delay";
     case Hold::SUMP_EMPTY:     return "Sump empty";
-    case Hold::NO_POWER_METER: return "No power meter";
+    case Hold::NO_CURRENT_SENSOR: return "No current sensor";
   }
   return "?";
 }

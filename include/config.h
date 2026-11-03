@@ -14,9 +14,9 @@
 #define PIN_RS485_TX      17
 #define PIN_RS485_DE      4     // DE+RE tied together. Set -1 for auto-direction modules.
 
-// ---- PZEM-004T v3 power meter (Modbus over TTL) on UART1 ------------------
-#define PIN_PZEM_RX       26    // ESP32 RX  <- PZEM TX
-#define PIN_PZEM_TX       27    // ESP32 TX  -> PZEM RX
+// ---- Analog inputs (must be ADC1 pins 32..39 - ADC2 is unusable with Wi-Fi on)
+#define PIN_CT_ADC        34    // pump current transformer (SCT-013 etc.) via 1.65 V bias network
+#define PIN_VT_ADC        35    // optional ZMPT101B mains voltage module, -1 if not fitted
 
 // ---- I2C OLED (SSD1306 128x64) --------------------------------------------
 #define PIN_I2C_SDA       21
@@ -43,6 +43,6 @@
 
 // ---- Timing ----------------------------------------------------------------
 #define SENSOR_POLL_MS    1000
-#define POWER_POLL_MS     500
+#define CT_POLL_MS        300   // pause between 200 ms RMS windows
 #define CONTROL_TICK_MS   200
 #define DISPLAY_MS        500
